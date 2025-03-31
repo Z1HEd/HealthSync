@@ -1,39 +1,116 @@
 //#define DEBUG_CONSOLE // Uncomment this if you want a debug console to start. You can use the Console class to print. You can use Console::inStrings to get input.
 
 #include <4dm.h>
+#include "JSONData.h"
 
 using namespace fdm;
 
 // Initialize the DLLMain
 initDLL
 
-$hook(void, StateGame, init, StateManager& s)
-{
-	// Your code that runs at first frame here (it calls when you load into the world)
+// Send health from server
 
-	original(self, s);
+float getEntityHealth(Entity* entity) {
+    if (entity->getName() == "Spider") return ((EntitySpider*)entity)->health;
+    if (entity->getName() == "Butterfly")return ((EntityButterfly*)entity)->health;
+    if (entity->getName() == "Player" && ((EntityPlayer*)entity)->ownedPlayer != nullptr) return ((EntityPlayer*)entity)->ownedPlayer->health;
+    Console::printLine("Unknown entity or empty EntityPlayer::ownedPlayer in getHealth ");
+    return 0;
 }
 
-$hook(void, Player, update, World* world, double dt, EntityPlayer* entityPlayer)
-{
-	// Your code that runs every frame here (it only calls when you play in world, because its Player's function)
+void onHealthChanged(WorldServer* server, Entity* entity) {
+    nlohmann::json healthData;
 
-	original(self, world, dt, entityPlayer);
+    healthData["entityId"] = stl::uuid::to_string(entity->id);
+    healthData["health"] = getEntityHealth(entity);
+
+    JSONData::broadcastPacket(server, "entityHealthSync", healthData);
 }
 
-$hook(bool, Player, keyInput, GLFWwindow* window, World* world, int key, int scancode, int action, int mods)
-{
-	// Your code that runs when Key Input happens (check GLFW Keyboard Input tutorials)|(it only calls when you play in world, because it is a Player function)
+void onHealthChanged(WorldServer* server, Player* player) {
+    nlohmann::json healthData;
 
-	return original(self, window, world, key, scancode, action, mods);
+    healthData["entityId"] = stl::uuid::to_string(player->EntityPlayerID);
+    healthData["health"] = player->health;
+
+    JSONData::broadcastPacket(server, "entityHealthSync", healthData);
 }
+
+// Update health on client
+
+void setEntityHealth(Entity* entity, float health) {
+    if (entity->getName()=="Spider") ((EntitySpider*)entity)->health = health;
+    else if (entity->getName() == "Butterfly")((EntityButterfly*)entity)->health = health;
+    else if (entity->getName() == "Player" && ((EntityPlayer*)entity)->ownedPlayer!=nullptr) ((EntityPlayer*)entity)->ownedPlayer->health = health;
+    else Console::printLine("Unknown entity or empty EntityPlayer::ownedPlayer in setHealth ");
+}
+
+void onEntityHealthSync(fdm::WorldClient* world, fdm::Player* player, const nlohmann::json& data) {
+    auto entityId = stl::uuid()(data["entityId"].get<std::string>());
+    float newHealth = data["health"].get<float>();
+    fdm::Entity* entity = world->getEntity(entityId);
+    if (entity)
+        setEntityHealth(entity, newHealth);
+}
+
+// Initialise stuff
 
 $hook(void, StateIntro, init, StateManager& s)
 {
-	original(self, s);
+    original(self, s);
 
-	// initialize opengl stuff
-	glewExperimental = true;
-	glewInit();
-	glfwInit();
+    Console::printLine("Initializing HealthSync mod");
+
+    // initialize opengl stuff
+    glewExperimental = true;
+    glewInit();
+    glfwInit();
+
+    JSONData::SCaddPacketCallback("entityHealthSync", onEntityHealthSync);
+}
+
+// Send packets when stuff happens
+
+$hook(void, Player, update, World* world, double dt, EntityPlayer* entityPlayer)
+{
+    original(self, world, dt, entityPlayer);
+
+    if (world->getType() != World::TYPE_SERVER) return;
+
+    WorldServer* server = (WorldServer*)(world);
+
+    static int lastUpdateHealth = 100;
+    int thisUpdateHealth = self->health;
+	
+    if (thisUpdateHealth != lastUpdateHealth) {
+        Console::printLine("PlayerHealthChanged! ");
+        onHealthChanged(server, self);
+    }
+    lastUpdateHealth = thisUpdateHealth;
+	
+}
+
+$hook(void, EntitySpider, takeDamage, float damage, World* world) {
+    original(self, damage, world);
+
+    if (world->getType() != World::TYPE_SERVER || damage <= 0) return;
+
+    WorldServer* server = (WorldServer*)(world);
+
+
+    Console::printLine("SpiderHealthChanged! ");
+    onHealthChanged(server, self);
+}
+
+$hook(void, EntityButterfly, takeDamage, float damage, World* world) {
+    original(self, damage, world);
+
+    if (world->getType() != World::TYPE_SERVER || damage <= 0) return;
+
+    WorldServer* server = (WorldServer*)(world);
+
+    
+
+    Console::printLine("ButterflyHealthChanged! ");
+    onHealthChanged(server, self);
 }
